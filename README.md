@@ -4,6 +4,9 @@ Render images in your terminal using colored Unicode block characters.
 
 Uses the half-block character `▄` with ANSI color codes to display images directly in the terminal. Each character cell encodes two vertical pixels — the background color for the top pixel and the foreground color for the bottom — giving surprisingly detailed results.
 
+<img width="1334" height="1229" alt="image" src="https://github.com/user-attachments/assets/61e23453-9040-48d7-a771-d115c9851e4a" />
+
+
 ## Install
 
 ```
