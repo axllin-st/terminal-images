@@ -70,10 +70,23 @@ fn main() {
             .unwrap_or(80)
     });
 
+    let term_height = terminal_size::terminal_size()
+        .map(|(_, h)| h.0 as u32)
+        .unwrap_or(24);
+    // Each row of half-blocks = 2 pixels, leave 1 row for the prompt
+    let max_rows = term_height.saturating_sub(1);
+    let max_pixel_height = max_rows * 2;
+
     let (orig_w, orig_h) = img.dimensions();
-    let new_width = term_width.max(1);
-    // Each character cell is ~2 pixels tall, so we halve the height ratio
-    let new_height = (orig_h as f64 / orig_w as f64 * new_width as f64 * 0.5).round() as u32;
+    let mut new_width = term_width.max(1);
+    let mut new_height = (orig_h as f64 / orig_w as f64 * new_width as f64).round() as u32;
+
+    // If image is too tall, scale down to fit terminal height
+    if new_height > max_pixel_height {
+        new_height = max_pixel_height;
+        new_width = (orig_w as f64 / orig_h as f64 * new_height as f64).round() as u32;
+    }
+
     // Ensure even height for clean row pairing
     let new_height = if new_height % 2 == 1 { new_height + 1 } else { new_height };
 
