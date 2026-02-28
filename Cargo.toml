@@ -8,3 +8,4 @@ image = "0.25"
 clap = { version = "4", features = ["derive"] }
 terminal_size = "0.4"
 ureq = "3"
+ctrlc = "3"

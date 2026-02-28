@@ -32,6 +32,14 @@ termimg ~/Pictures/screenshot.png
 termimg https://example.com/image.png
 ```
 
+**Animated GIFs:**
+
+```
+termimg animation.gif
+```
+
+GIFs with multiple frames will animate in the terminal, looping until you press Ctrl+C. Single-frame GIFs are rendered as static images.
+
 ### Options
 
 | Flag | Description |
@@ -64,3 +72,5 @@ PNG, JPEG, GIF, BMP, TIFF, WebP, and more (via the [image](https://crates.io/cra
 2. Resize to fit within the terminal (width and height), preserving aspect ratio
 3. Iterate pixel rows in pairs — for each pair, set the background color to the top pixel and the foreground color to the bottom pixel, then print `▄`
 4. Uses Lanczos3 resampling for quality downscaling
+
+For animated GIFs, all frames are pre-resized on load, then played back by overwriting the previous frame using cursor movement escape sequences. The cursor is hidden during playback for a cleaner look.
