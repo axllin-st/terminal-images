@@ -14,6 +14,20 @@ struct Args {
     /// Output width in terminal columns (defaults to terminal width)
     #[arg(short, long)]
     width: Option<u32>,
+
+    /// Use 24-bit truecolor (for iTerm2, Kitty, etc). Default is 256-color for Terminal.app compatibility.
+    #[arg(long)]
+    truecolor: bool,
+}
+
+/// Convert an 8-bit channel value (0-255) to the 6-level 256-color cube (0-5)
+fn to_ansi_level(v: u8) -> u8 {
+    ((v as u16 * 5 + 127) / 255) as u8
+}
+
+/// Convert RGB to a 256-color palette index (16-231 color cube)
+fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
+    16 + 36 * to_ansi_level(r) + 6 * to_ansi_level(g) + to_ansi_level(b)
 }
 
 fn main() {
@@ -26,12 +40,12 @@ fn main() {
 
     let term_width = args.width.unwrap_or_else(|| {
         terminal_size::terminal_size()
-            .map(|(w, _)| w.0 as u32)
+            .map(|(w, _)| (w.0 as u32).saturating_sub(1))
             .unwrap_or(80)
     });
 
     let (orig_w, orig_h) = img.dimensions();
-    let new_width = term_width;
+    let new_width = term_width.max(1);
     // Each character cell is ~2 pixels tall, so we halve the height ratio
     let new_height = (orig_h as f64 / orig_w as f64 * new_width as f64 * 0.5).round() as u32;
     // Ensure even height for clean row pairing
@@ -52,11 +66,20 @@ fn main() {
             };
 
             // Background = top pixel, foreground = bottom pixel, char = ▄
-            write!(
-                out,
-                "\x1b[48;2;{};{};{}m\x1b[38;2;{};{};{}m▄",
-                top[0], top[1], top[2], bottom[0], bottom[1], bottom[2],
-            )
+            if args.truecolor {
+                write!(
+                    out,
+                    "\x1b[48;2;{};{};{}m\x1b[38;2;{};{};{}m▄",
+                    top[0], top[1], top[2], bottom[0], bottom[1], bottom[2],
+                )
+            } else {
+                write!(
+                    out,
+                    "\x1b[48;5;{}m\x1b[38;5;{}m▄",
+                    rgb_to_256(top[0], top[1], top[2]),
+                    rgb_to_256(bottom[0], bottom[1], bottom[2]),
+                )
+            }
             .unwrap();
         }
         write!(out, "\x1b[0m\n").unwrap();
