@@ -1,15 +1,15 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
 use image::imageops::FilterType;
-use image::{GenericImageView, Pixel};
+use image::{DynamicImage, GenericImageView, Pixel};
 
 #[derive(Parser)]
 #[command(name = "termimg", about = "Render images in the terminal using colored Unicode blocks")]
 struct Args {
-    /// Path to the image file
-    image_path: PathBuf,
+    /// Path to image file or URL (http/https)
+    source: String,
 
     /// Output width in terminal columns (defaults to terminal width)
     #[arg(short, long)]
@@ -30,13 +30,39 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * to_ansi_level(r) + 6 * to_ansi_level(g) + to_ansi_level(b)
 }
 
+fn load_image(source: &str) -> DynamicImage {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let response = ureq::get(source).call().unwrap_or_else(|e| {
+            eprintln!("Failed to fetch URL '{source}': {e}");
+            std::process::exit(1);
+        });
+        let mut bytes = Vec::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(50 * 1024 * 1024) // 50MB limit
+            .read_to_end(&mut bytes)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to read response: {e}");
+                std::process::exit(1);
+            });
+        image::load_from_memory(&bytes).unwrap_or_else(|e| {
+            eprintln!("Failed to decode image from URL: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        let path = PathBuf::from(source);
+        image::open(&path).unwrap_or_else(|e| {
+            eprintln!("Failed to open image '{}': {e}", path.display());
+            std::process::exit(1);
+        })
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
-    let img = image::open(&args.image_path).unwrap_or_else(|e| {
-        eprintln!("Failed to open image '{}': {e}", args.image_path.display());
-        std::process::exit(1);
-    });
+    let img = load_image(&args.source);
 
     let term_width = args.width.unwrap_or_else(|| {
         terminal_size::terminal_size()
