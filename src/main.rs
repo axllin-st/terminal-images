@@ -7,12 +7,15 @@ use clap::Parser;
 use image::codecs::gif::GifDecoder;
 use image::imageops::FilterType;
 use image::{AnimationDecoder, DynamicImage, GenericImageView, ImageFormat, Pixel, RgbaImage};
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::Camera;
 
 #[derive(Parser)]
 #[command(name = "termimg", about = "Render images in the terminal using colored Unicode blocks")]
 struct Args {
     /// Path to image file or URL (http/https)
-    source: String,
+    source: Option<String>,
 
     /// Output width in terminal columns (defaults to terminal width)
     #[arg(short, long)]
@@ -21,6 +24,10 @@ struct Args {
     /// Use 24-bit truecolor (for iTerm2, Kitty, etc). Default is 256-color for Terminal.app compatibility.
     #[arg(long)]
     truecolor: bool,
+
+    /// Stream from webcam instead of a file
+    #[arg(long)]
+    webcam: bool,
 }
 
 /// Convert an 8-bit channel value (0-255) to the 6-level 256-color cube (0-5)
@@ -170,91 +177,156 @@ fn render_frame<W: Write>(img: &DynamicImage, truecolor: bool, out: &mut W) {
     }
 }
 
-fn main() {
-    let args = Args::parse();
-    let term = get_term_size(args.width);
+fn run_webcam(args: &Args, term: &TermSize) {
+    nokhwa::nokhwa_initialize(|_| {});
 
-    if is_gif_source(&args.source) {
-        let raw_frames = load_gif_frames(&args.source);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+    let mut camera = Camera::new(CameraIndex::Index(0), requested).unwrap_or_else(|e| {
+        eprintln!("Failed to open webcam: {e}");
+        std::process::exit(1);
+    });
+    camera.open_stream().unwrap_or_else(|e| {
+        eprintln!("Failed to start webcam stream: {e}");
+        std::process::exit(1);
+    });
 
-        if raw_frames.len() <= 1 {
-            // Single-frame GIF: render as static image
-            let img = if let Some((buf, _)) = raw_frames.into_iter().next() {
-                DynamicImage::ImageRgba8(buf)
-            } else {
-                eprintln!("GIF has no frames");
-                std::process::exit(1);
-            };
-            let (orig_w, orig_h) = img.dimensions();
-            let (nw, nh) = compute_render_dimensions(orig_w, orig_h, &term);
-            let img = img.resize_exact(nw, nh, FilterType::Lanczos3);
-            let stdout = io::stdout();
-            let mut out = io::BufWriter::new(stdout.lock());
-            render_frame(&img, args.truecolor, &mut out);
-            out.flush().unwrap();
-            return;
+    let resolution = camera.resolution();
+    let (orig_w, orig_h) = (resolution.width(), resolution.height());
+    let (nw, nh) = compute_render_dimensions(orig_w, orig_h, term);
+    let row_count = nh / 2;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Failed to set Ctrl+C handler");
+
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    write!(out, "\x1b[?25l").unwrap();
+
+    let mut first_frame = true;
+    while running.load(Ordering::SeqCst) {
+        let frame = match camera.frame() {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+
+        let decoded = match frame.decode_image::<RgbFormat>() {
+            Ok(buf) => buf,
+            Err(_) => continue,
+        };
+
+        let img = DynamicImage::ImageRgb8(decoded).resize_exact(nw, nh, FilterType::Triangle);
+
+        if !first_frame {
+            write!(out, "\x1b[{}A", row_count).unwrap();
         }
+        first_frame = false;
 
-        // Pre-resize all frames
-        let first = &raw_frames[0].0;
-        let (orig_w, orig_h) = (first.width(), first.height());
-        let (nw, nh) = compute_render_dimensions(orig_w, orig_h, &term);
-        let row_count = nh / 2;
-
-        let frames: Vec<(DynamicImage, Duration)> = raw_frames
-            .into_iter()
-            .map(|(buf, delay)| {
-                let img = DynamicImage::ImageRgba8(buf).resize_exact(nw, nh, FilterType::Lanczos3);
-                (img, delay)
-            })
-            .collect();
-
-        // Set up Ctrl+C handler
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-        ctrlc::set_handler(move || {
-            r.store(false, Ordering::SeqCst);
-        })
-        .expect("Failed to set Ctrl+C handler");
-
-        let stdout = io::stdout();
-        let mut out = io::BufWriter::new(stdout.lock());
-
-        // Hide cursor during animation
-        write!(out, "\x1b[?25l").unwrap();
-
-        let mut first_frame = true;
-        while running.load(Ordering::SeqCst) {
-            for (img, delay) in &frames {
-                if !running.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Move cursor up to overwrite previous frame (except for first frame)
-                if !first_frame {
-                    write!(out, "\x1b[{}A", row_count).unwrap();
-                }
-                first_frame = false;
-
-                render_frame(img, args.truecolor, &mut out);
-                out.flush().unwrap();
-                std::thread::sleep(*delay);
-            }
-        }
-
-        // Clean up: show cursor, reset colors
-        write!(out, "\x1b[?25h\x1b[0m").unwrap();
+        render_frame(&img, args.truecolor, &mut out);
         out.flush().unwrap();
-    } else {
-        // Static image path (unchanged)
-        let img = load_image(&args.source);
-        let (orig_w, orig_h) = img.dimensions();
-        let (nw, nh) = compute_render_dimensions(orig_w, orig_h, &term);
-        let img = img.resize_exact(nw, nh, FilterType::Lanczos3);
+    }
 
+    write!(out, "\x1b[?25h\x1b[0m").unwrap();
+    out.flush().unwrap();
+}
+
+fn run_gif(source: &str, args: &Args, term: &TermSize) {
+    let raw_frames = load_gif_frames(source);
+
+    if raw_frames.len() <= 1 {
+        let img = if let Some((buf, _)) = raw_frames.into_iter().next() {
+            DynamicImage::ImageRgba8(buf)
+        } else {
+            eprintln!("GIF has no frames");
+            std::process::exit(1);
+        };
+        let (orig_w, orig_h) = img.dimensions();
+        let (nw, nh) = compute_render_dimensions(orig_w, orig_h, term);
+        let img = img.resize_exact(nw, nh, FilterType::Lanczos3);
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
         render_frame(&img, args.truecolor, &mut out);
         out.flush().unwrap();
+        return;
+    }
+
+    let first = &raw_frames[0].0;
+    let (orig_w, orig_h) = (first.width(), first.height());
+    let (nw, nh) = compute_render_dimensions(orig_w, orig_h, term);
+    let row_count = nh / 2;
+
+    let frames: Vec<(DynamicImage, Duration)> = raw_frames
+        .into_iter()
+        .map(|(buf, delay)| {
+            let img = DynamicImage::ImageRgba8(buf).resize_exact(nw, nh, FilterType::Lanczos3);
+            (img, delay)
+        })
+        .collect();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Failed to set Ctrl+C handler");
+
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    write!(out, "\x1b[?25l").unwrap();
+
+    let mut first_frame = true;
+    while running.load(Ordering::SeqCst) {
+        for (img, delay) in &frames {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if !first_frame {
+                write!(out, "\x1b[{}A", row_count).unwrap();
+            }
+            first_frame = false;
+
+            render_frame(img, args.truecolor, &mut out);
+            out.flush().unwrap();
+            std::thread::sleep(*delay);
+        }
+    }
+
+    write!(out, "\x1b[?25h\x1b[0m").unwrap();
+    out.flush().unwrap();
+}
+
+fn run_static(source: &str, args: &Args, term: &TermSize) {
+    let img = load_image(source);
+    let (orig_w, orig_h) = img.dimensions();
+    let (nw, nh) = compute_render_dimensions(orig_w, orig_h, term);
+    let img = img.resize_exact(nw, nh, FilterType::Lanczos3);
+
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    render_frame(&img, args.truecolor, &mut out);
+    out.flush().unwrap();
+}
+
+fn main() {
+    let args = Args::parse();
+    let term = get_term_size(args.width);
+
+    if args.webcam {
+        run_webcam(&args, &term);
+    } else {
+        let source = args.source.as_deref().unwrap_or_else(|| {
+            eprintln!("Error: provide a source image or use --webcam");
+            std::process::exit(1);
+        });
+
+        if is_gif_source(source) {
+            run_gif(source, &args, &term);
+        } else {
+            run_static(source, &args, &term);
+        }
     }
 }

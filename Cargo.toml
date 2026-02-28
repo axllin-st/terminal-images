@@ -9,3 +9,4 @@ clap = { version = "4", features = ["derive"] }
 terminal_size = "0.4"
 ureq = "3"
 ctrlc = "3"
+nokhwa = { version = "0.10", features = ["input-avfoundation"] }
